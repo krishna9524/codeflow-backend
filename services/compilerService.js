@@ -113,6 +113,9 @@ const compileCode = (fullCode, language) => {
             if (isWin) {
                 compileArgs.push(`-I${path.join(MSYS_PATH, 'include')}`);
                 compileArgs.push(`-L${path.join(MSYS_PATH, 'lib')}`);
+            } else {
+                // 👉 THE FIX: Tell Linux exactly where the json.h folder is hidden!
+                compileArgs.push('-I/usr/include/jsoncpp');
             }
             compileArgs.push('-ljsoncpp');
 
