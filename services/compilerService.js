@@ -6,8 +6,16 @@ const User = require('../models/User');
 
 // --- Configuration ---
 const TEMP_DIR = path.join(__dirname, '..', 'temp');
-const JAVA_LIB_PATH = process.env.JAVA_LIB_PATH || 'C:/libs/json-20250517.jar';
-const MSYS_PATH = process.env.MSYS_PATH || 'C:/msys64/mingw64';
+
+// --- FIX #1: Cross-Platform Paths ---
+// If on Windows, use your local C: drive paths. If on Render (Linux), use the Docker paths!
+const isWin = process.platform === 'win32';
+const JAVA_LIB_PATH = isWin 
+    ? (process.env.JAVA_LIB_PATH || 'C:/libs/json-20250517.jar') 
+    : '/app/libs/json.jar';
+const MSYS_PATH = isWin 
+    ? (process.env.MSYS_PATH || 'C:/msys64/mingw64') 
+    : '';
 
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -52,18 +60,12 @@ const cleanupDirectory = (dirPath) => {
     }
 };
 
-// --- FIX #1: Re-introduce the memory measurement function ---
 const getMemoryUsage = (pid, callback) => {
-    const isWin = process.platform === 'win32';
-
-    // On Windows, use the more reliable 'wmic' command.
-    // On Linux/macOS, 'ps' is standard and works perfectly.
     const command = isWin
         ? `wmic process where processid=${pid} get WorkingSetSize /value`
         : `ps -p ${pid} -o rss=`;
 
     exec(command, (err, stdout, stderr) => {
-        // --- Improved error logging to help debug in the future ---
         if (err || stderr || !stdout) {
             if (err && err.message.includes('No Instance(s) Available')) {
                 // This is expected if the process is too fast, so don't log it as an error.
@@ -76,18 +78,16 @@ const getMemoryUsage = (pid, callback) => {
         let mem = 0;
         try {
             if (isWin) {
-                // WMIC output is like "WorkingSetSize=123456". It's in BYTES.
                 const match = stdout.trim().split('=');
                 if (match.length === 2) {
                     const memInBytes = parseInt(match[1], 10);
                     mem = Math.ceil(memInBytes / 1024); // Convert bytes to KB
                 }
             } else {
-                // ps output is already in KB.
                 mem = Math.ceil(parseInt(stdout.trim(), 10));
             }
         } catch {
-            mem = 0; // Default to 0 if parsing fails
+            mem = 0;
         }
 
         callback(isNaN(mem) ? 0 : mem);
@@ -104,10 +104,18 @@ const compileCode = (fullCode, language) => {
         
         if (language === 'cpp') {
             const sourcePath = path.join(tempDir, `main.cpp`);
-            const exePath = path.join(tempDir, 'main.exe');
+            // On Linux, standard executables don't need .exe
+            const exePath = path.join(tempDir, isWin ? 'main.exe' : 'main');
             fs.writeFileSync(sourcePath, fullCode, 'utf8');
 
-            const compileArgs = [ sourcePath, '-o', exePath, '-std=c++17', `-I${path.join(MSYS_PATH, 'include')}`, `-L${path.join(MSYS_PATH, 'lib')}`, '-ljsoncpp' ];
+            // --- FIX #2: Cross-platform C++ Compilation ---
+            let compileArgs = [sourcePath, '-o', exePath, '-std=c++17'];
+            if (isWin) {
+                compileArgs.push(`-I${path.join(MSYS_PATH, 'include')}`);
+                compileArgs.push(`-L${path.join(MSYS_PATH, 'lib')}`);
+            }
+            compileArgs.push('-ljsoncpp');
+
             const compile = spawn('g++', compileArgs);
             
             let compileError = '';
@@ -167,10 +175,11 @@ const runExecutable = ({ tempDir, executablePath, language, className }, input) 
             command = executablePath;
         } else if (language === 'java') {
             command = 'java';
-            const separator = process.platform === 'win32' ? ';' : ':';
+            const separator = isWin ? ';' : ':';
             args = ['-cp', `${tempDir}${separator}${JAVA_LIB_PATH}`, className];
         } else if (language === 'python') {
-            command = 'python';
+            // --- FIX #3: Use python3 specifically on Linux servers ---
+            command = isWin ? 'python' : 'python3';
             args = ['-u', executablePath];
         } else {
             resolve({ status: 'Error', output: '', error: 'Language not supported.', runtime: 0, memory: 0 });
@@ -178,10 +187,9 @@ const runExecutable = ({ tempDir, executablePath, language, className }, input) 
         }
 
         const startTime = process.hrtime.bigint();
-        const child = spawn(command, args, { cwd: tempDir, detached: process.platform !== 'win32' });
+        const child = spawn(command, args, { cwd: tempDir, detached: !isWin });
         
         let output = '', error = '';
-        // --- FIX #2: Re-integrate memory polling logic ---
         let peakMemoryInKb = 0;
         let memoryPoll;
 
@@ -192,13 +200,13 @@ const runExecutable = ({ tempDir, executablePath, language, className }, input) 
                         peakMemoryInKb = memKb;
                     }
                 });
-            }, 150); // Poll every 150ms for peak memory
+            }, 150); 
         }
 
         const timeout = setTimeout(() => {
-            if (memoryPoll) clearInterval(memoryPoll); // Stop polling on timeout
+            if (memoryPoll) clearInterval(memoryPoll); 
             if (!child.killed) {
-                process.platform === 'win32' ? spawn('taskkill', ['/pid', child.pid, '/f', '/t']) : process.kill(-child.pid, 'SIGKILL');
+                isWin ? spawn('taskkill', ['/pid', child.pid, '/f', '/t']) : process.kill(-child.pid, 'SIGKILL');
             }
         }, 10000); 
 
@@ -210,11 +218,10 @@ const runExecutable = ({ tempDir, executablePath, language, className }, input) 
 
         child.on('close', code => {
             clearTimeout(timeout);
-            if (memoryPoll) clearInterval(memoryPoll); // Stop polling when process closes
+            if (memoryPoll) clearInterval(memoryPoll); 
             const endTime = process.hrtime.bigint();
             const timeInMs = Number((endTime - startTime) / 1000000n);
             
-            // --- FIX #3: Pass the measured memory in every result object ---
             if (child.signalCode === 'SIGKILL') {
                 resolve({ status: 'Time Limit Exceeded', output, error: 'Process timed out after 10 seconds.', runtime: 10000, memory: peakMemoryInKb });
             } else if (code === 0) {
@@ -232,7 +239,6 @@ const runExecutable = ({ tempDir, executablePath, language, className }, input) 
     });
 };
 
-// --- Helper for "Run Code" button ---
 const executeCodeOnce = async (fullCode, language, input) => {
     const normalizedLang = normalizeLanguage(language);
     const compileResult = await compileCode(fullCode, normalizedLang);
@@ -251,8 +257,6 @@ const executeCodeOnce = async (fullCode, language, input) => {
     return runResult;
 };
 
-// --- Submission Processing ---
-// (No changes needed here, as it correctly uses the 'memory' field from runExecutable)
 const processSubmission = async (submission, question, userCode, language) => {
     const BATCH_SIZE = 4;
     const normalizedLang = normalizeLanguage(language);
