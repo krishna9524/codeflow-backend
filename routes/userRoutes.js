@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth'); // Assuming you have your auth middleware
+const auth = require('../middleware/auth'); // This is why we use 'auth' instead of 'authMiddleware'
 
 const {
     registerUser, 
@@ -16,7 +16,8 @@ const {
     getConnectionStatus, 
     getConnectionRequests, 
     getAllConnections, 
-    removeConnection
+    removeConnection,
+    updateLastSeen // 👉 FIX 1: Added updateLastSeen to your imports!
 } = require('../controllers/userController');
 
 // ==========================================
@@ -43,6 +44,9 @@ router.delete('/connections/:id', auth, removeConnection);
 router.post('/connect/:userId', auth, sendConnectionRequest);
 router.post('/connect/accept/:userId', auth, acceptConnectionRequest);
 router.get('/connect/status/:userId', auth, getConnectionStatus);
+
+// 👉 FIX 2: Uses 'auth' and 'updateLastSeen' directly!
+router.put('/ping', auth, updateLastSeen); 
 
 // ==========================================
 // 4. GENERAL USERS 

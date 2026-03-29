@@ -8,7 +8,7 @@ const UserSchema = new mongoose.Schema({
     avatar: { type: String },
     bio: { type: String },
     location: { type: String },
-    
+
     // --- SOCIAL LINKS ---
     socials: {
         github: String,
@@ -19,7 +19,6 @@ const UserSchema = new mongoose.Schema({
     // --- PLATFORM PROGRESS ---
     points: { type: Number, default: 0 },
     solvedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Question' }],
-    // Legacy support for progress object if used in some controllers
     progress: {
         solvedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Question' }]
     },
@@ -27,48 +26,42 @@ const UserSchema = new mongoose.Schema({
     // --- SOCIAL GRAPH ---
     connections: [{
         user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        status: { 
-            type: String, 
-            enum: ['pending', 'connected', 'sent'], // 'sent' helps UI know I sent it
-            default: 'pending' 
+        status: {
+            type: String,
+            enum: ['pending', 'connected', 'sent'],
+            default: 'pending'
         }
     }],
-    
+
     // --- CONTENT INTERACTION ---
     savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Discussion' }],
     profileViews: { type: Number, default: 0 },
 
-    // =========================================================
-    // 🧠 RECOMMENDATION ENGINE & TRUST SYSTEM (NEW)
-    // =========================================================
+    // ✅ FIX: lastSeen field — updated every time user pings or logs in.
+    // null means the user has never been seen (brand new account).
+    lastSeen: { type: Date, default: null },
 
-    // 1. Interest Embeddings (The "Brain")
-    // Map of "Topic" -> "Affinity Score (0-1.0)"
-    // e.g. { "react": 0.9, "python": 0.2, "career": 0.5 }
-    // This learns from every click, like, and dwell time.
+    // --- RECOMMENDATION ENGINE & TRUST SYSTEM ---
     interestVector: {
         type: Map,
         of: Number,
         default: {}
     },
 
-    // 2. Behavior Vector (The "Style")
-    // Tracks how they consume content to detect bots or hyper-active users
     behaviorStats: {
         avgReadTime: { type: Number, default: 0 },
-        likeRate: { type: Number, default: 0 }, // % of posts liked vs viewed
+        likeRate: { type: Number, default: 0 },
         commentRate: { type: Number, default: 0 }
     },
 
-    // 3. Authority / Trust System
-    // Used to filter spam and boost high-quality authors in the feed
-    trustScore: { type: Number, default: 50 }, // 0-100. <20 = Ghostban.
-    isShadowBanned: { type: Boolean, default: false }, // If true, posts exist but aren't recommended
+    trustScore: { type: Number, default: 50 },
+    isShadowBanned: { type: Boolean, default: false },
 
-    // 4. Anti-Gaming Counters
-    // Used to rate-limit signals so a bot can't "spam like" to train the algorithm
     dailyActionCount: { type: Number, default: 0 },
     lastActionTime: { type: Date, default: Date.now },
+
+    // --- ROLE ---
+    role: { type: String, enum: ['user', 'admin'], default: 'user' },
 
     createdAt: { type: Date, default: Date.now }
 });

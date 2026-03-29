@@ -5,6 +5,10 @@ const Discussion = require('../models/Discussion');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
+// ==========================================
+// 1. CONNECTION MANAGEMENT
+// ==========================================
+
 exports.sendConnectionRequest = async (req, res) => {
     try {
         const targetUserId = req.params.userId;
@@ -87,18 +91,19 @@ exports.getConnectionStatus = async (req, res) => {
 
 exports.getConnectionRequests = async (req, res) => {
     try {
-        const user = await User.findById(req.user.id).populate('connections.user', 'name username avatar bio position company');
+        // 👉 FIX: Added lastSeen to populate
+        const user = await User.findById(req.user.id).populate('connections.user', 'name username avatar bio position company lastSeen');
         if (!user) return res.status(404).json({ msg: 'User not found' });
 
         const requests = user.connections
-            // --- FIX: Added && c.user to prevent crashes here too ---
             .filter(c => c.status === 'pending' && c.user)
             .map(c => ({
                 _id: c.user._id,
                 name: c.user.name,
                 username: c.user.username,
                 avatar: c.user.avatar,
-                bio: c.user.bio
+                bio: c.user.bio,
+                lastSeen: c.user.lastSeen
             }));
 
         res.json(requests);
@@ -110,11 +115,11 @@ exports.getConnectionRequests = async (req, res) => {
 
 exports.getAllConnections = async (req, res) => {
     try {
-        const user = await User.findById(req.user.id).populate('connections.user', 'name username avatar bio');
+        // 👉 FIX: Added lastSeen to populate
+        const user = await User.findById(req.user.id).populate('connections.user', 'name username avatar bio lastSeen');
         if (!user) return res.status(404).json({ msg: 'User not found' });
 
         const connections = user.connections
-            // --- FIX: Added && c.user to prevent crashes from deleted users ---
             .filter(c => c.status === 'connected' && c.user)
             .map(c => ({
                 _id: c.user._id,
@@ -122,7 +127,7 @@ exports.getAllConnections = async (req, res) => {
                 username: c.user.username,
                 avatar: c.user.avatar,
                 bio: c.user.bio,
-                // Safely check for timestamp
+                lastSeen: c.user.lastSeen,
                 connectedAt: (c._id && typeof c._id.getTimestamp === 'function') ? c._id.getTimestamp() : new Date() 
             }));
 
@@ -156,6 +161,10 @@ exports.removeConnection = async (req, res) => {
     }
 };
 
+// ==========================================
+// 2. USER STATS & LEADERBOARD LOGIC
+// ==========================================
+
 const calculateUserScores = async () => {
     const allQuestions = await Question.find({}, '_id').lean();
     const validQuestionIds = new Set(allQuestions.map(q => q._id.toString()));
@@ -183,14 +192,17 @@ const calculateUserScores = async () => {
     return userScoreMap;
 };
 
-// getUserById
+// ==========================================
+// 3. CORE USER PROFILES & AUTHENTICATION
+// ==========================================
+
 exports.getUserById = async (req, res) => {
     try {
         const targetUserId = req.params.id;
         
         // 1. Fetch Target User
         const user = await User.findById(targetUserId)
-            .populate('connections.user', 'name avatar')
+            .populate('connections.user', 'name avatar lastSeen') // 👉 FIX: Populating lastSeen for friends
             .select('-password -interestVector')
             .lean();
 
@@ -346,6 +358,7 @@ exports.registerUser = async (req, res) => {
                     name: user.name, 
                     email: user.email, 
                     avatar: user.avatar,
+                    lastSeen: user.lastSeen,
                     savedPosts: user.savedPosts || [] 
                 } 
             });
@@ -365,6 +378,10 @@ exports.loginUser = async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(400).json({ msg: 'Invalid Credentials' });
 
+        // Update last seen automatically on login
+        user.lastSeen = Date.now();
+        await user.save();
+
         const payload = { user: { id: user.id } };
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '5d' }, (err, token) => {
             if (err) throw err;
@@ -375,6 +392,7 @@ exports.loginUser = async (req, res) => {
                     name: user.name, 
                     email: user.email, 
                     avatar: user.avatar,
+                    lastSeen: user.lastSeen,
                     savedPosts: user.savedPosts || [] 
                 } 
             });
@@ -419,7 +437,6 @@ exports.updateProfile = async (req, res) => {
     }
 };
 
-// getDashboardStats
 exports.getDashboardStats = async (req, res) => {
     try {
         const userId = req.user.id;
@@ -555,7 +572,7 @@ exports.getAllUsers = async (req, res) => {
             _id: { $ne: req.user.id },
             role: { $ne: 'admin' } 
         })
-        .select('-password -interestVector') 
+        .select('-password -interestVector') // 👉 FIX: lastSeen isn't excluded, so it comes through!
         .lean();
 
         const userList = users.map(user => {
@@ -596,12 +613,12 @@ exports.getSuggestions = async (req, res) => {
             currentUserId
         ]);
 
-        // Fetch candidates including their location and connections array for "fame" calculation
+        // 👉 FIX: Added 'lastSeen' to the select query
         const candidates = await User.find({
             _id: { $nin: Array.from(excludeIds) },
             role: { $ne: 'admin' }
         })
-        .select('name username avatar bio connections location interestVector solvedProblems')
+        .select('name username avatar bio connections location interestVector solvedProblems lastSeen')
         .populate('connections.user', 'name avatar')
         .lean();
 
@@ -609,7 +626,7 @@ exports.getSuggestions = async (req, res) => {
             let score = 0;
             let reason = "Suggested for you";
 
-            // 1. MUTUAL CONNECTIONS (Highest Priority)
+            // 1. MUTUAL CONNECTIONS
             const mutualUsers = candidate.connections
                 .map(c => c.user)
                 .filter(u => u && myNetworkIds.has(u._id.toString()))
@@ -620,10 +637,9 @@ exports.getSuggestions = async (req, res) => {
                 reason = mutualUsers.length === 1 ? `1 mutual connection` : `${mutualUsers.length} mutual connections`;
             }
 
-            // 2. LOCATION MATCH (Regional Recommendations)
+            // 2. LOCATION MATCH
             if (currentUser.location && candidate.location && currentUser.location.toLowerCase() === candidate.location.toLowerCase()) {
                 score += 10;
-                // Only override the reason if there are no mutuals
                 if (mutualUsers.length === 0) {
                     reason = `Based in ${candidate.location}`;
                 }
@@ -643,12 +659,10 @@ exports.getSuggestions = async (req, res) => {
                 }
             }
 
-            // 4. "FAME" / POPULARITY (Recommend big accounts)
-            // Fame is calculated by how many connections they have + how many problems they solved
+            // 4. "FAME" / POPULARITY
             const fameScore = (candidate.connections?.length || 0) + (candidate.solvedProblems?.length || 0);
             score += (fameScore * 0.2);
 
-            // If they scored high purely off fame and have no mutuals/location match
             if (mutualUsers.length === 0 && fameScore > 10 && reason === "Suggested for you") {
                 reason = "Popular in CodeFlow";
             }
@@ -671,34 +685,16 @@ exports.getSuggestions = async (req, res) => {
         res.status(500).send("Server Error");
     }
 };
-exports.getNews = async (req, res) => {
+
+// ==========================================
+// 4. LAST SEEN UTILITY
+// ==========================================
+
+exports.updateLastSeen = async (req, res) => {
     try {
-        let news = [];
-
-        // 1. Try to fetch personalized news first (Your existing logic)
-        if (req.user && feedService.getPersonalizedNews) {
-            try {
-                news = await feedService.getPersonalizedNews(req.user.id);
-            } catch (e) {
-                console.log("Personalized news failed, falling back to trending...");
-            }
-        }
-
-        // 2. THE FIX: If the personalized news array is empty, fetch Top Trending Posts!
-       if (!news || news.length === 0) {
-            news = await Discussion.aggregate([
-                // Removed the strict $match filter so it grabs ALL popular posts!
-                { $addFields: { reactionCount: { $size: { $ifNull: ["$reactions", []] } } } },
-                { $sort: { reactionCount: -1, views: -1, createdAt: -1 } },
-                { $limit: 5 },
-                // Added "content" so the frontend can generate a title if one is missing
-                { $project: { title: 1, content: 1, views: 1, reactionCount: 1, createdAt: 1 } }
-            ]);
-        }
-
-        res.json(news);
+        await User.findByIdAndUpdate(req.user.id, { lastSeen: Date.now() });
+        res.status(200).json({ msg: 'Ping successful' });
     } catch (err) {
-        console.error("News Error:", err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ msg: 'Server error' });
     }
 };
